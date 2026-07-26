@@ -4,8 +4,8 @@
 %
 %  Target: arXiv + UncertaiNLP @ EMNLP 2026 (ACL style).
 %  Draft status: COMPLETE. All results filled from the three-arm experiment
-%  (5,700 predictions); figures in . Compile:
-%    pdflatex paper2 && bibtex paper2 && pdflatex paper2 && pdflatex paper2
+%  (5,700 predictions). Figures (fig_*.png) sit alongside this file. Compile:
+%    pdflatex main && bibtex main && pdflatex main && pdflatex main
 %  Requires ACL style files (acl.sty, acl_natbib.bst) in the same folder.
 % ============================================================================
 \documentclass[11pt]{article}
@@ -294,7 +294,15 @@ continuous in $(0,1]$ and requires no additional forward passes.
 Generated answers rarely match gold labels exactly. We normalise case and
 punctuation, accept exact matches, and fall back to unique containment (the
 prediction contains exactly one option string). The match method is recorded per
-prediction.
+prediction. Crucially, smaller and quantized models frequently ignore the
+two-line template and reply with a bare label (``Beignets'') rather than
+``Answer: beignets''; such replies are correct and are scored against the whole
+reply, so no model is penalised for failing to follow the format. This matters
+for a fair cross-model comparison: scoring only an explicit answer field would
+understate the accuracy of the arm with the lowest format compliance and confound
+capability with instruction-following. Verbalized-confidence parsing is unaffected
+--- a bare reply still yields no confidence value --- so the verbalized parse rate
+is reported separately as a signal in its own right.
 
 \subsection{Metrics}
 We report accuracy, Expected Calibration Error \citep{naeini2015obtaining} with
@@ -311,7 +319,7 @@ From the same predictions, at no additional inference cost, we compute
 risk--coverage curves (accuracy retained as a function of the fraction of inputs
 answered), the area under the risk--coverage curve (AURC) per condition and
 signal, and a threshold-transfer analysis: a deferral threshold fit on clean
-images to a target selective accuracy is applied unchanged to each degraded
+images to answer a fixed fraction of them is applied unchanged to each degraded
 condition, and we report where it holds and where it silently admits errors.
 
 % ===========================================================================
@@ -424,9 +432,55 @@ budget on parameters, not precision.
 \includegraphics[width=0.95\columnwidth]{fig_risk_coverage.png}
 \caption{Risk--coverage by internal confidence. 7B-4bit (red) answers the most
 confident $\sim$80\% of inputs at essentially 100\% selective accuracy; deferring
-by 7B \emph{verbalized} confidence (grey dashed) is far weaker.}
+by 7B \emph{verbalized} confidence (grey dashed) is far weaker. AURC values in the
+legend are computed over the pooled predictions; Table~\ref{tab:means} reports the
+mean of the per-condition AURC, which is slightly larger.}
 \label{fig:rc}
 \end{figure}
+
+\paragraph{Threshold transfer.}
+A deployed system fixes a single deferral threshold and cannot retune it per
+condition, so what matters is whether a threshold calibrated on clean images stays
+safe under degradation. We fit an internal-confidence threshold on clean images to
+answer 90\% of them, then apply it unchanged to every condition
+(Table~\ref{tab:transfer}). For 7B-4bit the threshold transfers safely: selective
+accuracy stays at $\approx\!1.00$ in every degraded condition and \emph{no} errors
+are admitted above threshold; the cost of degradation is paid entirely in coverage,
+which falls gracefully to 0.39 at low light s3 as the model correctly becomes less
+confident. For 2B-4bit the same clean-calibrated threshold \emph{silently admits
+errors}: selective accuracy falls to 0.82 at glare s3 with 12\% of all inputs
+answered wrongly above threshold. The difference is a direct consequence of the
+scale gap in internal AUROC (0.80 vs 0.98): only the larger model's confidence is
+discriminative enough that a fixed threshold keeps its promise under shift. This is
+the operational form of the deployment recommendation --- the larger quantized
+model is not just more accurate, it is the only one whose deferral threshold can be
+trusted after calibration.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Arm & Condition & Cov. & Sel.\ acc. & Err.\ adm. \\
+\midrule
+\multirow{3}{*}{2B 4-bit}
+ & clean        & 0.90 & 0.98 & 2\% \\
+ & low light s3 & 0.48 & 0.88 & 6\% \\
+ & glare s3     & 0.65 & 0.82 & 12\% \\
+\midrule
+\multirow{3}{*}{7B 4-bit}
+ & clean        & 0.90 & 1.00 & 0\% \\
+ & low light s3 & 0.39 & 1.00 & 0\% \\
+ & glare s3     & 0.44 & 1.00 & 0\% \\
+\bottomrule
+\end{tabular}
+\caption{Threshold transfer. An internal-confidence threshold fit on clean images
+to answer 90\% of them, applied unchanged to degraded conditions. Coverage =
+fraction answered; Sel.\ acc.\ = accuracy among answered; Err.\ adm.\ = fraction of
+all inputs answered incorrectly above threshold. The 7B threshold never admits
+errors (it defers instead); the 2B-4bit threshold leaks errors under degradation.}
+\label{tab:transfer}
+\end{table}
 
 \begin{figure}[t]
 \centering
@@ -437,15 +491,19 @@ the collapse; all arms fall far below the clean baseline at severity 3.}
 \end{figure}
 
 \subsection{Calibration error would hide this}
-Because all arms are accurate and confident on most conditions, calibration-error
-measures are low and similar across arms and cannot separate a discriminative
-confidence signal from a near-constant one: a signal that is always $\approx\!0.9$
-on a 90\%-accurate condition is well calibrated yet useless for ranking, with
-AUROC near 0.5. This is exactly the regime of verbalized confidence here. Reliability
-diagrams and ECE assess whether confidence \emph{magnitude} matches accuracy;
-error-detection AUROC assesses whether confidence \emph{discriminates} correct
-from incorrect answers. Only the latter distinguishes the arms, which is why we
-adopt it as the primary metric and recommend it for future work on VLM confidence.
+Expected Calibration Error is low for every arm and every signal (0.01--0.07),
+because all arms are accurate and confident on most conditions. The clearest
+illustration is arm A: its \emph{verbalized} confidence has an ECE of just
+$0.011$ --- better ``calibrated'' than its own internal signal (ECE $0.053$) ---
+yet the same verbalized confidence separates correct from incorrect answers at
+AUROC $0.56$, barely above chance, while the internal signal reaches $0.95$ on the
+identical predictions. A confidence value that is nearly constant at $\approx\!0.9$
+on a 90\%-accurate condition is well calibrated and completely useless for
+ranking. Reliability diagrams and ECE assess whether confidence \emph{magnitude}
+matches accuracy; error-detection AUROC assesses whether confidence
+\emph{discriminates} correct from incorrect answers. ECE does not distinguish the
+arms; AUROC does, which is why we adopt it as the primary metric and recommend it
+for future work on VLM confidence.
 
 % ===========================================================================
 \section{Discussion}
