@@ -129,6 +129,48 @@ def aurc(conf, ok):
     risk = 1 - sel
     return float(np.trapz(risk, cov))
 
+def ece(conf, ok, bins=10):
+    """Expected Calibration Error, 10 equal-width bins."""
+    conf = np.asarray(conf, dtype=float); ok = np.asarray(ok, dtype=float)
+    m = ~np.isnan(conf); conf, ok = conf[m], ok[m]
+    if len(conf) == 0:
+        return np.nan
+    e, N = 0.0, len(conf)
+    for i in range(bins):
+        lo, hi = i / bins, (i + 1) / bins
+        sel = (conf > lo) & (conf <= hi) if i > 0 else (conf >= lo) & (conf <= hi)
+        if sel.sum() == 0:
+            continue
+        e += abs(ok[sel].mean() - conf[sel].mean()) * sel.sum() / N
+    return float(e)
+
+def brier(conf, ok):
+    conf = np.asarray(conf, dtype=float); ok = np.asarray(ok, dtype=float)
+    m = ~np.isnan(conf); conf, ok = conf[m], ok[m]
+    if len(conf) == 0:
+        return np.nan
+    return float(np.mean((conf - ok) ** 2))
+
+def threshold_transfer(d, target_clean_coverage=0.90):
+    """
+    Fit an internal-confidence threshold on clean images to answer a target
+    fraction of them, apply it unchanged to every condition, and report per
+    condition: coverage, selective accuracy, and the error-admission rate
+    (fraction of ALL items that are wrong yet score above the threshold).
+    Returns (threshold, DataFrame).
+    """
+    clean = d[d.degradation == "clean"]
+    t = float(np.quantile(clean["internal"].values, 1 - target_clean_coverage))
+    rows = []
+    for (fam, sev), g in d.groupby(["degradation", "severity"]):
+        above = g["internal"].values >= t
+        cov = float(above.mean())
+        sel_acc = float(g["ok"].values[above].mean()) if above.sum() else float("nan")
+        err_admit = float(((g["internal"].values >= t) & (g["ok"].values == 0)).mean())
+        rows.append(dict(degradation=fam, severity=sev, coverage=cov,
+                         selective_acc=sel_acc, error_admit_rate=err_admit))
+    return t, pd.DataFrame(rows)
+
 # --------------------------------------------------------------- per-condition table
 def summary(d):
     rows = []
@@ -141,7 +183,10 @@ def summary(d):
                          verb_parse=g["verbalized"].notna().mean(),
                          auroc_verb=vi, verb_lo=vlo, verb_hi=vhi,
                          auroc_int=ii, int_lo=ilo, int_hi=ihi,
-                         aurc_int=aurc(g["internal"].values, g["ok"].values)))
+                         aurc_int=aurc(g["internal"].values, g["ok"].values),
+                         ece_int=ece(g["internal"].values, g["ok"].values),
+                         ece_verb=ece(g["verbalized"].values, g["ok"].values),
+                         brier_int=brier(g["internal"].values, g["ok"].values)))
     df = pd.DataFrame(rows)
     df["_o"] = df["degradation"].map({f: i for i, f in enumerate(FAM_ORDER)})
     return df.sort_values(["_o", "severity"]).drop(columns="_o").reset_index(drop=True)
@@ -232,13 +277,25 @@ def main():
                     verb_parse=d["verbalized"].notna().mean(),
                     int_auroc=np.nanmean(s["auroc_int"]),
                     verb_auroc=np.nanmean(s["auroc_verb"]),
-                    aurc_int=np.nanmean(s["aurc_int"]))
+                    aurc_int=np.nanmean(s["aurc_int"]),
+                    ece_int=ece(d["internal"].values, d["ok"].values),
+                    ece_verb=ece(d["verbalized"].values, d["ok"].values),
+                    brier_int=brier(d["internal"].values, d["ok"].values),
+                    pooled_aurc_int=aurc(d["internal"].values, d["ok"].values))
     means = {"2B-fp16": arm_means(A, sA), "2B-nf4": arm_means(B, sB), "7B-nf4": arm_means(C, sC)}
 
     fig_scale_auroc(sB, sC, out / "fig_scale_auroc.png")
     fig_quant_bars(means, out / "fig_quant_bars.png")
     fig_risk_coverage(arms, out / "fig_risk_coverage.png")
     fig_lowlight(arms, out / "fig_lowlight.png")
+
+    # threshold-transfer: clean-calibrated internal-confidence threshold (answer 90%
+    # of clean), applied unchanged to every condition, for each arm.
+    tt = {}
+    for label, d in arms.items():
+        t, tab = threshold_transfer(d, target_clean_coverage=0.90)
+        tab.to_csv(out / f"threshold_transfer_{label}.csv", index=False)
+        tt[label] = {"threshold": round(t, 3), "table": tab}
 
     headline = {
         "n_pred_total": int(len(A) + len(B) + len(C)),
@@ -251,7 +308,14 @@ def main():
     (out / "headline_numbers.json").write_text(json.dumps(headline, indent=2))
 
     print(json.dumps(headline, indent=2))
-    print("\nWrote summaries + 4 figures to", out)
+    print("\n=== threshold transfer (clean-calibrated, answer 90% of clean) ===")
+    for label in ("2B-nf4", "7B-nf4"):
+        t = tt[label]["threshold"]; tab = tt[label]["table"]
+        for cn in ("low_light", "glare"):
+            r = tab[(tab.degradation == cn) & (tab.severity == 3)].iloc[0]
+            print(f"  {label} t={t}  {cn} s3: coverage {r.coverage:.2f} "
+                  f"sel_acc {r.selective_acc:.3f} errors_admitted {r.error_admit_rate*100:.0f}%")
+    print("\nWrote summaries, threshold-transfer tables, and 4 figures to", out)
 
 if __name__ == "__main__":
     main()
