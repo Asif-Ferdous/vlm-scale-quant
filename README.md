@@ -2,8 +2,7 @@
 
 M M Asif Ferdous · Independent Researcher · 2026
 
-Code, data, and figures for the paper. arXiv preprint — link to be added.
-
+Code, data, and figures for the paper. arXiv preprint — (http://arxiv.org/abs/2607.24440)
 ## Summary
 
 A practitioner deploying a vision-language model on a fixed 16 GB GPU can fit three
